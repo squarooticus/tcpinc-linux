@@ -83,6 +83,10 @@ struct tcp_sack_block {
 	u32	end_seq;
 };
 
+/* TCP-ENO */
+
+#define TCP_ENO_USING_EXID true
+
 /*These are used to set the sack_ok field in struct tcp_options_received */
 #define TCP_SACK_SEEN     (1 << 0)   /*1 = peer is SACK capable, */
 #define TCP_FACK_ENABLED  (1 << 1)   /*1 = FACK is enabled locally*/
@@ -104,6 +108,7 @@ struct tcp_options_received {
 	u8	num_sacks;	/* Number of SACK blocks		*/
 	u16	user_mss;	/* mss requested by user in ioctl	*/
 	u16	mss_clamp;	/* Maximal mss, negotiated at connection setup */
+	bool	eno : 1;	/* Header contained ENO option		*/
 };
 
 static inline void tcp_clear_options(struct tcp_options_received *rx_opt)
@@ -134,6 +139,7 @@ struct tcp_request_sock {
 						  * FastOpen it's the seq#
 						  * after data-in-SYN.
 						  */
+	struct tcp_eno			*eno; /* TCP-ENO negotiation state */
 };
 
 static inline struct tcp_request_sock *tcp_rsk(const struct request_sock *req)
@@ -236,7 +242,8 @@ struct tcp_sock {
 		syn_fastopen_ch:1, /* Active TFO re-enabling probe */
 		syn_data_acked:1,/* data in SYN is acked by SYN-ACK */
 		save_syn:1,	/* Save headers of SYN packet */
-		is_cwnd_limited:1;/* forward progress limited by snd_cwnd? */
+		is_cwnd_limited:1,/* forward progress limited by snd_cwnd? */
+		syn_eno:1;	/* SYN includes ENO option */
 	u32	tlp_high_seq;	/* snd_nxt at the time of TLP retransmit. */
 
 /* RTT measurement */
@@ -370,6 +377,10 @@ struct tcp_sock {
 	 * socket. Used to retransmit SYNACKs etc.
 	 */
 	struct request_sock *fastopen_rsk;
+
+/* TCP ENO handshake state */
+	struct tcp_eno *eno;
+
 	u32	*saved_syn;
 };
 

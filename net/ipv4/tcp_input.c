@@ -3717,6 +3717,31 @@ static void tcp_parse_fastopen_option(int len, const unsigned char *cookie,
 	foc->exp = exp_opt;
 }
 
+static void tcp_parse_eno_option(int len, const unsigned char *opt_payload,
+				 bool syn, struct tcp_options_received *opt_rx,
+				 struct tcp_eno_syn_subopts *rx_sso)
+{
+	if (len < 0)
+		return;
+
+	printk(KERN_CRIT "ENO: received ENO option\n");
+	opt_rx->eno = true;
+
+	if (syn) {
+		if (rx_sso) {
+			printk(KERN_CRIT "ENO: parsing SYN subopts\n");
+			tcp_eno_set_syn_subopts(rx_sso, len, opt_payload);
+		} else
+			printk(KERN_CRIT "ENO: SYN received but no rx_sso instance\n");
+	} else {
+		if (rx_sso)
+			rx_sso->len = 0;
+		if (len > 0)
+			printk(KERN_CRIT "ENO: received non-SYN subopts\n");
+	}
+	/* TODO: non-SYN ENO suboption data is TEP-specific */
+}
+
 /* Look for tcp options. Normally only called on SYN and SYNACK packets.
  * But, this can also be called on packets in the established flow when
  * the fast version below fails.
@@ -3724,7 +3749,8 @@ static void tcp_parse_fastopen_option(int len, const unsigned char *cookie,
 void tcp_parse_options(const struct net *net,
 		       const struct sk_buff *skb,
 		       struct tcp_options_received *opt_rx, int estab,
-		       struct tcp_fastopen_cookie *foc)
+		       struct tcp_fastopen_cookie *foc,
+		       struct tcp_eno_syn_subopts *eno_rx_sso)
 {
 	const unsigned char *ptr;
 	const struct tcphdr *th = tcp_hdr(skb);
@@ -3748,7 +3774,7 @@ void tcp_parse_options(const struct net *net,
 			if (opsize < 2) /* "silly options" */
 				return;
 			if (opsize > length)
-				return;	/* don't parse partial options */
+				return; /* don't parse partial options */
 			switch (opcode) {
 			case TCPOPT_MSS:
 				if (opsize == TCPOLEN_MSS && th->syn && !estab) {
@@ -3814,13 +3840,30 @@ void tcp_parse_options(const struct net *net,
 					ptr, th->syn, foc, false);
 				break;
 
-			case TCPOPT_EXP:
-				/* Fast Open option shares code 254 using a
-				 * 16 bits magic number.
+			case TCPOPT_ENO:
+				tcp_parse_eno_option(opsize - TCPOLEN_ENO_BASE,
+					ptr, th->syn, opt_rx, eno_rx_sso);
+				break;
+
+			case TCPOPT_EXP_253:
+				/* ENO option shares option kind 253 using a 16
+				 * bit ExID.
+				 */
+				if (opsize >= TCPOLEN_EXP_ENO_BASE &&
+				    get_unaligned_be16(ptr) ==
+				    TCPOPT_ENO_EXID)
+					tcp_parse_eno_option(opsize -
+						TCPOLEN_EXP_ENO_BASE,
+						ptr + 2, th->syn, opt_rx, eno_rx_sso);
+				break;
+
+			case TCPOPT_EXP_254:
+				/* Fast Open option shares option kind 254 using
+				 * a 16 bit ExID.
 				 */
 				if (opsize >= TCPOLEN_EXP_FASTOPEN_BASE &&
 				    get_unaligned_be16(ptr) ==
-				    TCPOPT_FASTOPEN_MAGIC)
+				    TCPOPT_FASTOPEN_EXID)
 					tcp_parse_fastopen_option(opsize -
 						TCPOLEN_EXP_FASTOPEN_BASE,
 						ptr + 2, th->syn, foc, true);
@@ -3872,7 +3915,7 @@ static bool tcp_fast_parse_options(const struct net *net,
 			return true;
 	}
 
-	tcp_parse_options(net, skb, &tp->rx_opt, 1, NULL);
+	tcp_parse_options(net, skb, &tp->rx_opt, 1, NULL, NULL);
 	if (tp->rx_opt.saw_tstamp && tp->rx_opt.rcv_tsecr)
 		tp->rx_opt.rcv_tsecr -= tp->tsoffset;
 
@@ -5535,6 +5578,13 @@ step5:
 
 	tcp_rcv_rtt_measure_ts(sk, skb);
 
+	/* Make sure we stop sending ENO options if ENO has been confirmed by
+	   the peer */
+	if (unlikely(!th->syn && tp->rx_opt.eno)) {
+		printk(KERN_CRIT "ENO: remote enabled ENO\n");
+		tcp_eno_set_remote_enabled(tp->eno);
+	}
+
 	/* Process urgent data. */
 	tcp_urg(sk, skb, th);
 
@@ -5605,7 +5655,7 @@ static bool tcp_rcv_fastopen_synack(struct sock *sk, struct sk_buff *synack,
 		/* Get original SYNACK MSS value if user MSS sets mss_clamp */
 		tcp_clear_options(&opt);
 		opt.user_mss = opt.mss_clamp = 0;
-		tcp_parse_options(sock_net(sk), synack, &opt, 0, NULL);
+		tcp_parse_options(sock_net(sk), synack, &opt, 0, NULL, NULL);
 		mss = opt.mss_clamp;
 	}
 
@@ -5656,10 +5706,12 @@ static int tcp_rcv_synsent_state_process(struct sock *sk, struct sk_buff *skb,
 	struct inet_connection_sock *icsk = inet_csk(sk);
 	struct tcp_sock *tp = tcp_sk(sk);
 	struct tcp_fastopen_cookie foc = { .len = -1 };
+	struct tcp_eno_syn_subopts eno_rx_sso;
 	int saved_clamp = tp->rx_opt.mss_clamp;
 	bool fastopen_fail;
 
-	tcp_parse_options(sock_net(sk), skb, &tp->rx_opt, 0, &foc);
+	tcp_parse_options(sock_net(sk), skb, &tp->rx_opt, 0, &foc,
+			  tp->syn_eno && th->syn ? &eno_rx_sso : NULL);
 	if (tp->rx_opt.saw_tstamp && tp->rx_opt.rcv_tsecr)
 		tp->rx_opt.rcv_tsecr -= tp->tsoffset;
 
@@ -5715,6 +5767,17 @@ static int tcp_rcv_synsent_state_process(struct sock *sk, struct sk_buff *skb,
 		 */
 
 		tcp_ecn_rcv_synack(tp, th);
+
+		if (tp->eno) {
+			printk(KERN_CRIT "ENO: processing SYNACK\n");
+			if (!tcp_eno_negotiate(tp->eno, &eno_rx_sso)) {
+				printk(KERN_CRIT "ENO: negotiation failed\n");
+				/* TODO: Free ENO negotiation state early */
+			} else {
+				printk(KERN_CRIT "ENO: negotiation succeeded for TEP ID 0x%02x\n",
+				       tcp_eno_negotiated_tep(tp->eno));
+			}
+		}
 
 		tcp_init_wl(tp, TCP_SKB_CB(skb)->seq);
 		tcp_ack(sk, skb, FLAG_SLOWPATH);
@@ -5837,6 +5900,17 @@ discard:
 		tp->snd_wnd    = ntohs(th->window);
 		tp->snd_wl1    = TCP_SKB_CB(skb)->seq;
 		tp->max_window = tp->snd_wnd;
+
+		if (tp->eno) {
+			printk(KERN_CRIT "ENO: processing simultaneous-open SYN\n");
+			if (!tcp_eno_negotiate(tp->eno, &eno_rx_sso)) {
+				printk(KERN_CRIT "ENO: negotiation failed\n");
+				/* TODO: Free ENO negotiation state early */
+			} else {
+				printk(KERN_CRIT "ENO: negotiation succeeded for TEP ID 0x%02x\n",
+				       tcp_eno_negotiated_tep(tp->eno));
+			}
+		}
 
 		tcp_ecn_rcv_syn(tp, th);
 
@@ -6307,6 +6381,8 @@ int tcp_conn_request(struct request_sock_ops *rsk_ops,
 	struct request_sock *req;
 	bool want_cookie = false;
 	struct flowi fl;
+	struct tcp_eno_syn_subopts eno_rx_sso;
+	struct tcp_eno *eno;
 
 	/* TW buckets are converted to open requests without
 	 * limitations, they conserve resources and peer is
@@ -6334,8 +6410,11 @@ int tcp_conn_request(struct request_sock_ops *rsk_ops,
 	tcp_clear_options(&tmp_opt);
 	tmp_opt.mss_clamp = af_ops->mss_clamp;
 	tmp_opt.user_mss  = tp->rx_opt.user_mss;
+
+	/* TODO: disable ENO if we don't want it */
 	tcp_parse_options(sock_net(sk), skb, &tmp_opt, 0,
-			  want_cookie ? NULL : &foc);
+			  want_cookie ? NULL : &foc,
+			  want_cookie ? NULL : &eno_rx_sso);
 
 	if (want_cookie && !tmp_opt.saw_tstamp)
 		tcp_clear_options(&tmp_opt);
@@ -6396,6 +6475,21 @@ int tcp_conn_request(struct request_sock_ops *rsk_ops,
 	if (!want_cookie) {
 		tcp_reqsk_record_syn(sk, req, skb);
 		fastopen_sk = tcp_try_fastopen(sk, skb, req, &foc, dst);
+		/* TODO: make sure the next conditional implies population of
+		   eno_rx_sso, or we'll process garbage */
+		if (!fastopen_sk && tmp_opt.eno) {
+			printk(KERN_CRIT "ENO: processing SYN\n");
+			/* TODO: Not sure if this is the correct allocator */
+			tcp_rsk(req)->eno = kzalloc(sizeof(*eno), GFP_ATOMIC);
+			tcp_eno_init(tcp_rsk(req)->eno, false);
+			if (!tcp_eno_negotiate(tcp_rsk(req)->eno, &eno_rx_sso)) {
+				printk(KERN_CRIT "ENO: negotiation failed\n");
+				/* TODO: Free ENO negotiation state early */
+			} else {
+				printk(KERN_CRIT "ENO: negotiation succeeded for TEP ID 0x%02x\n",
+				       tcp_eno_negotiated_tep(tcp_rsk(req)->eno));
+			}
+		}
 	}
 	if (fastopen_sk) {
 		af_ops->send_synack(fastopen_sk, dst, &fl, req,

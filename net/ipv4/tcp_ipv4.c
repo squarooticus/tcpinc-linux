@@ -890,6 +890,8 @@ static int tcp_v4_send_synack(const struct sock *sk, struct dst_entry *dst,
  */
 static void tcp_v4_reqsk_destructor(struct request_sock *req)
 {
+	if (tcp_rsk(req)->eno)
+		kfree(tcp_rsk(req)->eno);
 	kfree(inet_rsk(req)->opt);
 }
 
@@ -1908,6 +1910,14 @@ static int tcp_v4_init_sock(struct sock *sk)
 	return 0;
 }
 
+static inline void tcp_free_eno(struct tcp_sock *tp)
+{
+	if (tp->eno) {
+		kfree(tp->eno);
+		tp->eno = NULL;
+	}
+}
+
 void tcp_v4_destroy_sock(struct sock *sk)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
@@ -1947,6 +1957,7 @@ void tcp_v4_destroy_sock(struct sock *sk)
 
 	/* If socket is aborted during connect operation */
 	tcp_free_fastopen_req(tp);
+	tcp_free_eno(tp);
 	tcp_saved_syn_free(tp);
 
 	sk_sockets_allocated_dec(sk);

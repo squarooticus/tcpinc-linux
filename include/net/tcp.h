@@ -42,6 +42,7 @@
 #include <net/tcp_states.h>
 #include <net/inet_ecn.h>
 #include <net/dst.h>
+#include <net/tcp_eno.h>
 
 #include <linux/seq_file.h>
 #include <linux/memcontrol.h>
@@ -187,11 +188,14 @@ void tcp_time_wait(struct sock *sk, int state, int timeo);
 #define TCPOPT_TIMESTAMP	8	/* Better RTT estimations/PAWS */
 #define TCPOPT_MD5SIG		19	/* MD5 Signature (RFC2385) */
 #define TCPOPT_FASTOPEN		34	/* Fast open (RFC7413) */
-#define TCPOPT_EXP		254	/* Experimental */
+#define TCPOPT_ENO		69	/* TCP-ENO (draft experimental) */
+#define TCPOPT_EXP_253		253	/* Experimental option kind (RFC6994) */
+#define TCPOPT_EXP_254		254	/* Experimental option kind (RFC6994) */
 /* Magic number to be after the option value for sharing TCP
  * experimental options. See draft-ietf-tcpm-experimental-options-00.txt
  */
-#define TCPOPT_FASTOPEN_MAGIC	0xF989
+#define TCPOPT_FASTOPEN_EXID	0xF989
+#define TCPOPT_ENO_EXID		0x454E
 
 /*
  *     TCP option lengths
@@ -203,7 +207,9 @@ void tcp_time_wait(struct sock *sk, int state, int timeo);
 #define TCPOLEN_TIMESTAMP      10
 #define TCPOLEN_MD5SIG         18
 #define TCPOLEN_FASTOPEN_BASE  2
+#define TCPOLEN_ENO_BASE       2
 #define TCPOLEN_EXP_FASTOPEN_BASE  4
+#define TCPOLEN_EXP_ENO_BASE   4
 
 /* But this is what stacks really send out. */
 #define TCPOLEN_TSTAMP_ALIGNED		12
@@ -432,7 +438,8 @@ int tcp_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, int nonblock,
 		int flags, int *addr_len);
 void tcp_parse_options(const struct net *net, const struct sk_buff *skb,
 		       struct tcp_options_received *opt_rx,
-		       int estab, struct tcp_fastopen_cookie *foc);
+		       int estab, struct tcp_fastopen_cookie *foc,
+		       struct tcp_eno_syn_subopts *eno_rx_sso);
 const u8 *tcp_parse_md5sig_option(const struct tcphdr *th);
 
 /*
