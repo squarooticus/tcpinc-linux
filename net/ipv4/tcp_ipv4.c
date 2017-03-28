@@ -1910,7 +1910,7 @@ static int tcp_v4_init_sock(struct sock *sk)
 	return 0;
 }
 
-static inline void tcp_free_eno(struct tcp_sock *tp)
+void tcp_free_eno(struct tcp_sock *tp)
 {
 	if (tp->eno) {
 		kfree(tp->eno);

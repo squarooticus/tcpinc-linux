@@ -429,8 +429,7 @@ struct tcp_out_options {
 	__u8 *hash_location;	/* temporary pointer, overloaded */
 	__u32 tsval, tsecr;	/* need to include OPTION_TS */
 	struct tcp_fastopen_cookie *fastopen_cookie;	/* Fast open cookie */
-	struct tcp_eno *eno;	/* need to include OPTION_ENO */
-	bool eno_include_sso:1;	/* include the ENO SYN subopts? */
+	const struct tcp_eno_syn_subopts *eno_sso; /* need to include OPTION_ENO */
 };
 
 /* Write previously computed TCP options to the packet.
@@ -543,29 +542,29 @@ static void tcp_options_write(__be32 *ptr, struct tcp_sock *tp,
 	if (unlikely(OPTION_ENO & options)) {
 		u8 *p = (u8 *)ptr;
 		u32 len;
-		int subopts_len = opts->eno_include_sso ?
-			tcp_eno_syn_subopts_len(opts->eno) :
-			0;
 
 		/* TODO: remove ExID eventually */
 		if (TCP_ENO_USING_EXID) {
 			printk(KERN_CRIT "ENO: building with ExID\n");
-			len = TCPOLEN_EXP_ENO_BASE + subopts_len;
+			len = TCPOLEN_EXP_ENO_BASE +
+				(opts->eno_sso ? opts->eno_sso->len : 0);
 			*ptr = htonl((TCPOPT_EXP_253 << 24) | (len << 16) |
 				     TCPOPT_ENO_EXID);
 			p += TCPOLEN_EXP_ENO_BASE;
 		} else {
 			printk(KERN_CRIT "ENO: building with IANA option kind\n");
-			len = TCPOLEN_ENO_BASE + subopts_len;
+			len = TCPOLEN_ENO_BASE +
+				(opts->eno_sso ? opts->eno_sso->len : 0);
 			*p++ = TCPOPT_ENO;
 			*p++ = len;
 		}
 
-		if (opts->eno_include_sso)
-			memcpy(p, tcp_eno_syn_subopts_val(opts->eno),
-			       subopts_len);
+		if (opts->eno_sso) {
+			memcpy(p, opts->eno_sso->val, opts->eno_sso->len);
+			p += opts->eno_sso->len;
+		}
 
-		memset(p + subopts_len, TCPOPT_NOP, (4 - (len & 3)) & 3);
+		memset(p, TCPOPT_NOP, (4 - (len & 3)) & 3);
 		ptr += (len + 3) >> 2;
 	}
 }
@@ -619,23 +618,25 @@ static unsigned int tcp_syn_options(struct sock *sk, struct sk_buff *skb,
 		if (unlikely(!(OPTION_TS & opts->options)))
 			remaining -= TCPOLEN_SACKPERM_ALIGNED;
 	}
-	if (likely(tp->eno)) {
-		u32 need = tcp_eno_syn_subopts_len(tp->eno);
-		printk(KERN_CRIT "ENO: building SYN\n");
+	if (likely(tp->eno_enabled)) {
+		const struct tcp_eno_syn_subopts *sso =
+			tcp_eno_get_syn_subopts(tp->eno);
+		u32 need = sso->len;
+		printk(KERN_CRIT "ENO: proposing SYN\n");
 		/* TODO: remove ExID support */
-		need += TCP_ENO_USING_EXID ? TCPOLEN_EXP_ENO_BASE 
+		need += TCP_ENO_USING_EXID ? TCPOLEN_EXP_ENO_BASE
 					   : TCPOLEN_ENO_BASE;
 		need = (need + 3) & ~3U;  /* Align to 32 bits */
 		if (remaining >= need) {
-			printk(KERN_CRIT "ENO: using %d octets\n", need);
+			printk(KERN_CRIT "ENO: will use %d octets\n", need);
 			opts->options |= OPTION_ENO;
-			opts->eno = tp->eno;
-			opts->eno_include_sso = true;
+			opts->eno_sso = sso;
 			remaining -= need;
 			tp->syn_eno = 1;
 		} else {
 			printk(KERN_CRIT "ENO: disabled (option space)\n");
-			/* TODO: Free ENO negotiation state early */
+			tp->eno_enabled = false;
+			tcp_free_eno(tp);
 		}
 	}
 	if (!tp->syn_eno && fastopen && fastopen->cookie.len >= 0) {
@@ -701,25 +702,27 @@ static unsigned int tcp_synack_options(struct request_sock *req,
 		if (unlikely(!ireq->tstamp_ok))
 			remaining -= TCPOLEN_SACKPERM_ALIGNED;
 	}
-	if (treq->eno) {
-		u32 need = tcp_eno_syn_subopts_len(treq->eno);
-		printk(KERN_CRIT "ENO: building SYNACK\n");
+	if (treq->eno_enabled) {
+		const struct tcp_eno_syn_subopts *sso =
+			tcp_eno_get_syn_subopts(treq->eno);
+		u32 need = sso->len;
+		printk(KERN_CRIT "ENO: proposing SYNACK\n");
 		/* TODO: remove ExID support */
-		need += TCP_ENO_USING_EXID ? TCPOLEN_EXP_ENO_BASE 
+		need += TCP_ENO_USING_EXID ? TCPOLEN_EXP_ENO_BASE
 					   : TCPOLEN_ENO_BASE;
 		need = (need + 3) & ~3U;  /* Align to 32 bits */
 		if (remaining >= need) {
 			printk(KERN_CRIT "ENO: using %d octets\n", need);
 			opts->options |= OPTION_ENO;
-			opts->eno = treq->eno;
-			opts->eno_include_sso = true;
+			opts->eno_sso = sso;
 			remaining -= need;
 		} else {
 			printk(KERN_CRIT "ENO: disabled (option space)\n");
+			treq->eno_enabled = false;
 			/* TODO: Free ENO negotiation state early */
 		}
 	}
-	if (!treq->eno && foc != NULL && foc->len >= 0) {
+	if (!treq->eno_enabled && foc != NULL && foc->len >= 0) {
 		u32 need = foc->len;
 
 		need += foc->exp ? TCPOLEN_EXP_FASTOPEN_BASE :
@@ -776,19 +779,19 @@ static unsigned int tcp_established_options(struct sock *sk, struct sk_buff *skb
 			opts->num_sack_blocks * TCPOLEN_SACK_PERBLOCK;
 	}
 
-	if (tp->eno && !tcp_eno_has_remote_enabled(tp->eno)) {
+	if (tp->eno_enabled && !tcp_eno_has_remote_enabled(tp->eno)) {
 		/* Keep sending ENO options until we get an ENO in a non-SYN ACK
 		   from the peer */
 		/* TODO: remove ExID support */
 		/* TODO: may indicate termination of ENO options by cleaning up
 		   ENO negotiation state */
+		/* TODO: do we need to worry about size here? */
 		u32 need = TCP_ENO_USING_EXID ? TCPOLEN_EXP_ENO_BASE 
 					      : TCPOLEN_ENO_BASE;
-		printk(KERN_CRIT "ENO: building ACK\n");
+		printk(KERN_CRIT "ENO: proposing ACK\n");
 		need = (need + 3) & ~3U;  /* Align to 32 bits */
 		printk(KERN_CRIT "ENO: using %d octets\n", need);
 		opts->options |= OPTION_ENO;
-		opts->eno = tp->eno;
 		size += need;
 	}
 
@@ -3373,8 +3376,10 @@ static void tcp_connect_init(struct sock *sk)
 	tp->eno = kzalloc(sizeof(struct tcp_eno), sk->sk_allocation);
 	if (likely(tp->eno)) {
 		printk(KERN_CRIT "ENO: initializing active opener\n");
+		tp->eno_enabled = true;
 		tcp_eno_init(tp->eno, true);
-	}
+	} else
+		printk(KERN_CRIT "ENO: allocation failed\n");
 
 	/* If user gave his TCP_MAXSEG, record it to clamp */
 	if (tp->rx_opt.user_mss)

@@ -3558,6 +3558,14 @@ static int tcp_ack(struct sock *sk, const struct sk_buff *skb, int flag)
 	sack_state.first_sackt = 0;
 	sack_state.rate = &rs;
 
+	/* Make sure we stop sending ENO options if ENO has been confirmed by
+	   the peer */
+	if (unlikely(tp->eno_enabled) && likely(!tcp_hdr(skb)->syn) &&
+	    unlikely(!tcp_eno_has_remote_enabled(tp->eno))) {
+		printk(KERN_CRIT "ENO: remote enabled ENO\n");
+		tcp_eno_set_remote_enabled(tp->eno);
+	}
+
 	/* We very likely will need to access write queue head. */
 	prefetchw(sk->sk_write_queue.next);
 
@@ -3724,22 +3732,19 @@ static void tcp_parse_eno_option(int len, const unsigned char *opt_payload,
 	if (len < 0)
 		return;
 
-	printk(KERN_CRIT "ENO: received ENO option\n");
 	opt_rx->eno = true;
 
-	if (syn) {
-		if (rx_sso) {
+	if (rx_sso) {
+		if (syn) {
 			printk(KERN_CRIT "ENO: parsing SYN subopts\n");
 			tcp_eno_set_syn_subopts(rx_sso, len, opt_payload);
-		} else
-			printk(KERN_CRIT "ENO: SYN received but no rx_sso instance\n");
-	} else {
-		if (rx_sso)
+		} else {
+			/* TODO: non-SYN ENO suboption data is TEP-specific */
 			rx_sso->len = 0;
-		if (len > 0)
-			printk(KERN_CRIT "ENO: received non-SYN subopts\n");
+			if (len > 0)
+				printk(KERN_CRIT "ENO: ignoring non-SYN subopts\n");
+		}
 	}
-	/* TODO: non-SYN ENO suboption data is TEP-specific */
 }
 
 /* Look for tcp options. Normally only called on SYN and SYNACK packets.
@@ -3854,7 +3859,8 @@ void tcp_parse_options(const struct net *net,
 				    TCPOPT_ENO_EXID)
 					tcp_parse_eno_option(opsize -
 						TCPOLEN_EXP_ENO_BASE,
-						ptr + 2, th->syn, opt_rx, eno_rx_sso);
+						ptr + 2, th->syn, opt_rx,
+						eno_rx_sso);
 				break;
 
 			case TCPOPT_EXP_254:
@@ -5578,13 +5584,6 @@ step5:
 
 	tcp_rcv_rtt_measure_ts(sk, skb);
 
-	/* Make sure we stop sending ENO options if ENO has been confirmed by
-	   the peer */
-	if (unlikely(!th->syn && tp->rx_opt.eno)) {
-		printk(KERN_CRIT "ENO: remote enabled ENO\n");
-		tcp_eno_set_remote_enabled(tp->eno);
-	}
-
 	/* Process urgent data. */
 	tcp_urg(sk, skb, th);
 
@@ -5768,15 +5767,15 @@ static int tcp_rcv_synsent_state_process(struct sock *sk, struct sk_buff *skb,
 
 		tcp_ecn_rcv_synack(tp, th);
 
-		if (tp->eno) {
+		if (tp->eno_enabled) {
 			printk(KERN_CRIT "ENO: processing SYNACK\n");
 			if (!tcp_eno_negotiate(tp->eno, &eno_rx_sso)) {
 				printk(KERN_CRIT "ENO: negotiation failed\n");
-				/* TODO: Free ENO negotiation state early */
-			} else {
+				tp->eno_enabled = false;
+				tcp_free_eno(tp);
+			} else
 				printk(KERN_CRIT "ENO: negotiation succeeded for TEP ID 0x%02x\n",
 				       tcp_eno_negotiated_tep(tp->eno));
-			}
 		}
 
 		tcp_init_wl(tp, TCP_SKB_CB(skb)->seq);
@@ -5901,15 +5900,15 @@ discard:
 		tp->snd_wl1    = TCP_SKB_CB(skb)->seq;
 		tp->max_window = tp->snd_wnd;
 
-		if (tp->eno) {
+		if (tp->eno_enabled) {
 			printk(KERN_CRIT "ENO: processing simultaneous-open SYN\n");
 			if (!tcp_eno_negotiate(tp->eno, &eno_rx_sso)) {
 				printk(KERN_CRIT "ENO: negotiation failed\n");
-				/* TODO: Free ENO negotiation state early */
-			} else {
+				tp->eno_enabled = false;
+				tcp_free_eno(tp);
+			} else
 				printk(KERN_CRIT "ENO: negotiation succeeded for TEP ID 0x%02x\n",
 				       tcp_eno_negotiated_tep(tp->eno));
-			}
 		}
 
 		tcp_ecn_rcv_syn(tp, th);
@@ -6382,7 +6381,6 @@ int tcp_conn_request(struct request_sock_ops *rsk_ops,
 	bool want_cookie = false;
 	struct flowi fl;
 	struct tcp_eno_syn_subopts eno_rx_sso;
-	struct tcp_eno *eno;
 
 	/* TW buckets are converted to open requests without
 	 * limitations, they conserve resources and peer is
@@ -6478,17 +6476,22 @@ int tcp_conn_request(struct request_sock_ops *rsk_ops,
 		/* TODO: make sure the next conditional implies population of
 		   eno_rx_sso, or we'll process garbage */
 		if (!fastopen_sk && tmp_opt.eno) {
-			printk(KERN_CRIT "ENO: processing SYN\n");
 			/* TODO: Not sure if this is the correct allocator */
-			tcp_rsk(req)->eno = kzalloc(sizeof(*eno), GFP_ATOMIC);
-			tcp_eno_init(tcp_rsk(req)->eno, false);
-			if (!tcp_eno_negotiate(tcp_rsk(req)->eno, &eno_rx_sso)) {
-				printk(KERN_CRIT "ENO: negotiation failed\n");
-				/* TODO: Free ENO negotiation state early */
-			} else {
-				printk(KERN_CRIT "ENO: negotiation succeeded for TEP ID 0x%02x\n",
-				       tcp_eno_negotiated_tep(tcp_rsk(req)->eno));
-			}
+			struct tcp_eno *eno = kzalloc(sizeof(*eno), GFP_ATOMIC);
+			if (likely(eno)) {
+				printk(KERN_CRIT "ENO: processing SYN\n");
+				tcp_eno_init(eno, false);
+				if (!tcp_eno_negotiate(eno, &eno_rx_sso)) {
+					printk(KERN_CRIT "ENO: negotiation failed\n");
+					kfree(eno);
+				} else {
+					printk(KERN_CRIT "ENO: negotiation succeeded for TEP ID 0x%02x\n",
+					       tcp_eno_negotiated_tep(eno));
+					tcp_rsk(req)->eno = eno;
+					tcp_rsk(req)->eno_enabled = true;
+				}
+			} else
+				printk(KERN_CRIT "ENO: allocation failed\n");
 		}
 	}
 	if (fastopen_sk) {

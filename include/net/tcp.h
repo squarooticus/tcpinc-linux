@@ -1818,6 +1818,7 @@ void tcp_proc_unregister(struct net *net, struct tcp_seq_afinfo *afinfo);
 extern struct request_sock_ops tcp_request_sock_ops;
 extern struct request_sock_ops tcp6_request_sock_ops;
 
+void tcp_free_eno(struct tcp_sock *tp);
 void tcp_v4_destroy_sock(struct sock *sk);
 
 struct sk_buff *tcp_gso_segment(struct sk_buff *skb,

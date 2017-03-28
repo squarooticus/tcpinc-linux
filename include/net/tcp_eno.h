@@ -84,14 +84,12 @@ void tcp_eno_init(struct tcp_eno *eno, bool active);
 /* Returns true iff negotiation succeeds, setting eno->neg_ofs appropriately. */
 bool tcp_eno_negotiate(struct tcp_eno *eno, struct tcp_eno_syn_subopts *r_sso);
 
-static inline int tcp_eno_syn_subopts_len(struct tcp_eno *eno)
+static inline const struct tcp_eno_syn_subopts *
+tcp_eno_get_syn_subopts(struct tcp_eno *eno)
 {
-	return eno->sso.len;
-}
-
-static inline const u8 *tcp_eno_syn_subopts_val(struct tcp_eno *eno)
-{
-	return eno->sso.val;
+	if (!eno || eno->sso.len < 0)
+		return NULL;
+	return &eno->sso;
 }
 
 static inline void tcp_eno_set_remote_enabled(struct tcp_eno *eno)

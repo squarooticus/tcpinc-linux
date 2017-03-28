@@ -139,6 +139,7 @@ struct tcp_request_sock {
 						  * FastOpen it's the seq#
 						  * after data-in-SYN.
 						  */
+	bool				eno_enabled : 1; /* TCP-ENO */
 	struct tcp_eno			*eno; /* TCP-ENO negotiation state */
 };
 
@@ -379,6 +380,7 @@ struct tcp_sock {
 	struct request_sock *fastopen_rsk;
 
 /* TCP ENO handshake state */
+	bool	eno_enabled : 1;
 	struct tcp_eno *eno;
 
 	u32	*saved_syn;

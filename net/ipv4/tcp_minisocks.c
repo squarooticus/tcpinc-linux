@@ -537,8 +537,11 @@ struct sock *tcp_create_openreq_child(const struct sock *sk,
 		newtp->rack.advanced = 0;
 
 		/* Transfer ownership of ENO handshake instance */
-		newtp->eno = treq->eno;
-		treq->eno = NULL;
+		if (treq->eno_enabled) {
+			newtp->eno_enabled = true;
+			newtp->eno = treq->eno;
+			treq->eno = NULL;
+		}
 
 		__TCP_INC_STATS(sock_net(sk), TCP_MIB_PASSIVEOPENS);
 	}
