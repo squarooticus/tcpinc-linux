@@ -268,12 +268,14 @@ static inline void negotiate_tep(struct tcp_eno_syn_subopts *sso_A,
 		*neg_iter_A = soiter_end(sso_A);
 	if (neg_iter_B)
 		*neg_iter_B = soiter_end(sso_B);
+	printk(KERN_CRIT "ENO: sso_A: %*ph\n", sso_A->len, sso_A->val);
+	printk(KERN_CRIT "ENO: sso_B: %*ph\n", sso_B->len, sso_B->val);
 	while (iter_B != soiter_end(sso_B)) {
 		const u8 *iter_A;
 		int cand_tep_id = soiter_tep_id(sso_B, iter_B);
 		if (cand_tep_id != -1
 		    && (iter_A = valid_tep_for_A(sso_A, sso_B, cand_tep_id,
-						 iter_B))) {
+						 iter_B)) != soiter_end(sso_A)) {
 			if (neg_iter_A)
 				*neg_iter_A = iter_A;
 			if (neg_iter_B)
@@ -297,8 +299,9 @@ static void set_syn_subopts(int len, const u8 *val,
 	}
 }
 
-static const u8 eno_active_sso_default[] = { 0x21, 0x23 };
-static const u8 eno_passive_sso_default[] = { TCP_ENO_GSO_ROLE_B, 0x21, 0x23 };
+/* TODO: These need to be configurable via /proc and given proper defaults */
+static const u8 eno_active_sso_default[] = { 0x21, 0x23, 0x35 };
+static const u8 eno_passive_sso_default[] = { TCP_ENO_GSO_ROLE_B, 0x21, 0x23, 0x36 };
 
 void tcp_eno_init(struct tcp_eno *eno, bool active)
 {
